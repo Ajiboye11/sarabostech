@@ -4,6 +4,8 @@ const cors = require('cors');
 const mysql = require('mysql2/promise');
 const webpush = require('web-push');
 const { createClient } = require('@supabase/supabase-js');
+const registerEmailRoute = require('./email-server-addon');
+   registerEmailRoute(app);
 
 const REQUIRED_ENV = ['DB_HOST', 'DB_USER', 'DB_NAME', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
