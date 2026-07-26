@@ -9,7 +9,7 @@
     "dev": "node --watch server.js",
     "generate-vapid": "web-push generate-vapid-keys"
   },
-"dependencies": {
+  "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -18,3 +18,4 @@
     "web-push": "^3.6.7",
     "nodemailer": "^6.9.0"
   }
+}
