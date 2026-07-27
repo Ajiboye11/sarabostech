@@ -98,9 +98,9 @@ async function writeStorageValue(key, value) {
 }
 
 /* Never let plaintext PINs land in the database, no matter which code path
-   (bootstrap, admin edit, registration, forgot-PIN) produced the write. Any
-   employee object carrying a plain `pin` gets it hashed into `pinHash` and
-   the plaintext dropped, right here at the storage layer. */
+   (bootstrap, admin edit, forgot-PIN) produced the write. Any employee
+   object carrying a plain `pin` gets it hashed into `pinHash` and the
+   plaintext dropped, right here at the storage layer. */
 /* Only SUPER_ADMIN_EMAIL may ever hold Super Admin. Checked on every write
    to 'employees', regardless of who's writing (including admin tokens) —
    this is what makes it actually tamper-proof rather than just a rule the
@@ -127,8 +127,8 @@ async function sendEmailInternal(payload) {
    steps, their role, and the reminder that a signed agreement is required.
    Called (a) right after an admin directly adds someone via /api/employees,
    since they're active immediately, and (b) from the generic employees
-   write route below, the moment a self-registered account flips from
-   pending -> approved. Silently does nothing if there's no email on file. */
+   write route below, the moment someone is reactivated after being
+   deactivated. Silently does nothing if there's no email on file. */
 async function sendWelcomeEmail(emp) {
   if (!emp || !emp.email) return;
   await sendEmailInternal({
@@ -139,6 +139,13 @@ async function sendWelcomeEmail(emp) {
     roles: emp.roles,
     isAdmin: !!emp.isAdmin,
   });
+}
+/* Fires the moment an employee is deactivated — from the generic employees
+   write route below. Confirms the deactivation and tells them to contact
+   their admin. Silently does nothing if there's no email on file. */
+async function sendDeactivatedEmail(emp) {
+  if (!emp || !emp.email) return;
+  await sendEmailInternal({ type: 'deactivated', to: emp.email, name: emp.name });
 }
 function makeVerificationCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
 function makeSessionId() { return 'bs_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
@@ -298,7 +305,6 @@ app.post('/api/auth/login', async (req, res) => {
     if (ok && wasLegacyPlaintext) await writeStorageValue('employees', employees); // persist the upgrade to a hash
 
     if (!ok) return res.status(401).json({ error: 'No match. Check name and PIN.' });
-    if (match.pendingApproval) return res.status(403).json({ error: 'Your account is awaiting admin approval.' });
     if (match.active === false) return res.status(403).json({ error: 'This account is marked inactive. Contact an admin.' });
 
     const token = signToken(match, !!remember);
@@ -321,9 +327,9 @@ function requireAuth(req, res, next) {
   }
 }
 // Like requireAuth, but lets the request through with req.user=null instead
-// of rejecting — used only on the two routes that legitimately have
-// legitimate anonymous callers (registration, forgot-PIN reset), where the
-// payload shape itself (checked below) is what's actually validated.
+// of rejecting — used only on the generic storage write route, which has
+// one legitimate anonymous caller (forgot-PIN reset), where the payload
+// shape itself (checked below) is what's actually validated.
 function optionalAuth(req, res, next) {
   const header = req.get('authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -342,74 +348,53 @@ function requireAdmin(req, res, next) {
 
 // Keys only an admin/super-admin token may write to — HR, payroll, and
 // company-configuration data. ('employees' is handled separately below,
-// since registration and forgot-PIN both need a narrow anonymous carve-out.)
+// since the forgot-PIN flow needs a narrow anonymous carve-out.)
 const ADMIN_ONLY_WRITE_KEYS = new Set([
   'departments', 'settings', 'automations', 'agreements', 'agreementSignatures',
   'payrollRuns', 'budgets', 'invoices', 'companyInitialized',
 ]);
 
-/* Registration and "forgot PIN" both need to write to 'employees' before
-   the person has ever logged in — there's no token to check yet. Rather
-   than trust any unauthenticated write to that key, this validates the
-   *shape* of the change itself, so the only two things an anonymous caller
-   can ever do to the employee list are:
-     (a) append exactly one new, unprivileged, pending-approval employee
-         (a registration request), or
-     (b) change exactly one existing employee's PIN and nothing else
-         (a forgot-PIN reset).
-   Anything else — editing roles, activating/deactivating someone, removing
-   an employee, touching more than one record, replacing the whole list —
-   is rejected unless the caller has an admin/super-admin token.
+/* The "forgot PIN" flow needs to write to 'employees' before the person has
+   ever logged in — there's no token to check yet. Rather than trust any
+   unauthenticated write to that key, this validates the *shape* of the
+   change itself, so the only thing an anonymous caller can ever do to the
+   employee list is change exactly one existing employee's PIN and nothing
+   else (a forgot-PIN reset). Anything else — adding, editing roles,
+   activating/deactivating someone, removing an employee, touching more than
+   one record, replacing the whole list — is rejected unless the caller has
+   an admin/super-admin token.
 
    NOTE: as of the dedicated /api/employees, /api/auth/pin/change, and
-   /api/auth/forgot/* / /api/auth/register/* endpoints below, the frontend
-   no longer needs to hit this path for either case — those flows now patch
-   one record server-side instead of resubmitting the whole array. This is
-   kept as defense in depth for any other/older client still POSTing the
-   full list directly. */
-function isUnprivilegedPendingSignup(e) {
-  return !!e && e.pendingApproval === true && e.active === false && !e.isAdmin && !e.isSuperAdmin;
-}
+   /api/auth/forgot/* endpoints below, the frontend no longer needs to hit
+   this path at all. Kept as defense in depth for any other/older client
+   still POSTing the full list directly. */
 function anonymousEmployeeWriteIsAllowed(oldArr, newArr, callerSub) {
   if (!Array.isArray(oldArr) || !Array.isArray(newArr)) return false;
   const oldById = new Map(oldArr.map((e) => [e.id, e]));
   const newById = new Map(newArr.map((e) => [e.id, e]));
 
-  if (newArr.length === oldArr.length + 1) {
-    // Case (a): registration — every existing record must be byte-identical,
-    // and the one new record must look like an unprivileged pending signup.
-    for (const [id, oldE] of oldById) {
-      const newE = newById.get(id);
-      if (!newE || JSON.stringify(oldE) !== JSON.stringify(newE)) return false;
-    }
-    const added = newArr.filter((e) => !oldById.has(e.id));
-    return added.length === 1 && isUnprivilegedPendingSignup(added[0]);
-  }
+  if (newArr.length !== oldArr.length) return false; // no additions/removals allowed anonymously
 
-  if (newArr.length === oldArr.length) {
-    // Case (b): a PIN-only change to exactly one existing record — either
-    // the anonymous forgot-PIN flow, or a logged-in non-admin changing their
-    // own PIN from profile settings. If the caller IS logged in (has a
-    // token), they may only ever touch their OWN record this way — a
-    // logged-in non-admin can never modify a coworker's PIN.
-    let changedCount = 0, changedId = null;
-    for (const [id, oldE] of oldById) {
-      const newE = newById.get(id);
-      if (!newE) return false; // someone got removed — not allowed anonymously
-      if (JSON.stringify(oldE) === JSON.stringify(newE)) continue;
-      changedCount++;
-      changedId = id;
-      if (changedCount > 1) return false;
-      const oldRest = { ...oldE }; delete oldRest.pin; delete oldRest.pinHash;
-      const newRest = { ...newE }; delete newRest.pin; delete newRest.pinHash;
-      if (JSON.stringify(oldRest) !== JSON.stringify(newRest)) return false; // something besides the PIN changed
-    }
-    if (changedCount !== 1) return false;
-    if (callerSub && changedId !== callerSub) return false; // logged in as someone else — not allowed
-    return true;
+  // A PIN-only change to exactly one existing record — either the
+  // anonymous forgot-PIN flow, or a logged-in non-admin changing their own
+  // PIN from profile settings. If the caller IS logged in (has a token),
+  // they may only ever touch their OWN record this way — a logged-in
+  // non-admin can never modify a coworker's PIN.
+  let changedCount = 0, changedId = null;
+  for (const [id, oldE] of oldById) {
+    const newE = newById.get(id);
+    if (!newE) return false; // someone got removed — not allowed anonymously
+    if (JSON.stringify(oldE) === JSON.stringify(newE)) continue;
+    changedCount++;
+    changedId = id;
+    if (changedCount > 1) return false;
+    const oldRest = { ...oldE }; delete oldRest.pin; delete oldRest.pinHash;
+    const newRest = { ...newE }; delete newRest.pin; delete newRest.pinHash;
+    if (JSON.stringify(oldRest) !== JSON.stringify(newRest)) return false; // something besides the PIN changed
   }
-
-  return false; // any other size change (removals, bulk edits) needs an admin token
+  if (changedCount !== 1) return false;
+  if (callerSub && changedId !== callerSub) return false; // logged in as someone else — not allowed
+  return true;
 }
 
 /* ==================================================================
@@ -427,10 +412,9 @@ function anonymousEmployeeWriteIsAllowed(oldArr, newArr, callerSub) {
    sites that do exactly this for ordinary HR edits.
 
    Two independent fixes are applied:
-   1) These endpoints let the three PIN-touching flows (add employee,
-      change my PIN, forgot-PIN reset, registration) update exactly one
-      record's credential server-side, without the client ever sending
-      the array at all.
+   1) These endpoints let the three PIN-touching flows (add employee, change
+      my PIN, forgot-PIN reset) update exactly one record's credential
+      server-side, without the client ever sending the array at all.
    2) As a backstop for every OTHER existing (and any future) code path
       that still does a full-array save of 'employees' — see the merge
       in POST /api/storage/:key below — any employee in an incoming
@@ -465,8 +449,7 @@ app.post('/api/employees', requireAdmin, async (req, res) => {
     employees.push(emp);
     await writeStorageValue('employees', employees);
     broadcastUpdate('employees', stripCreds(employees));
-    // This account is active immediately (unlike a self-registration, which
-    // waits for approval below) — send the welcome/onboarding email now.
+    // Admin-added accounts are active immediately — send the welcome/onboarding email now.
     sendWelcomeEmail(emp).catch((e) => console.error('[welcome-email]', e.message));
     res.json({ employee: safeEmployee(emp) });
   } catch (e) {
@@ -557,70 +540,6 @@ app.post('/api/auth/forgot/confirm', async (req, res) => {
   }
 });
 
-// Pending self-registrations: sessionId -> { name, email, pin, code, expires }.
-const pendingRegistrations = new Map();
-
-app.post('/api/auth/register/request-code', async (req, res) => {
-  const { name, email, pin } = req.body || {};
-  if (!name || !email || !pin) return res.status(400).json({ error: 'name, email, and pin are required' });
-  if (String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 digits.' });
-  try {
-    const employees = (await readStorageValue('employees')) || [];
-    if (employees.some((e) => (e.name || '').toLowerCase() === String(name).trim().toLowerCase())) {
-      return res.status(409).json({ error: 'An account with that name already exists.' });
-    }
-    const sessionId = makeSessionId();
-    const code = makeVerificationCode();
-    const expires = Date.now() + 10 * 60 * 1000;
-    pendingRegistrations.set(sessionId, { name: String(name).trim(), email: String(email).trim(), pin: String(pin), code, expires });
-    await sendEmailInternal({ type: 'verify', to: email, name, code, expiresAt: expires });
-    res.json({ sessionId });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'could not start verification' });
-  }
-});
-
-app.post('/api/auth/register/resend-code', async (req, res) => {
-  const { sessionId } = req.body || {};
-  const draft = pendingRegistrations.get(sessionId);
-  if (!draft) return res.status(400).json({ error: 'This verification session is invalid or expired. Start again.' });
-  draft.code = makeVerificationCode();
-  draft.expires = Date.now() + 10 * 60 * 1000;
-  await sendEmailInternal({ type: 'verify', to: draft.email, name: draft.name, code: draft.code, expiresAt: draft.expires });
-  res.json({ ok: true });
-});
-
-app.post('/api/auth/register/confirm', async (req, res) => {
-  const { sessionId, code } = req.body || {};
-  const draft = pendingRegistrations.get(sessionId);
-  if (!draft) return res.status(400).json({ error: 'This verification session is invalid or already used. Start again.' });
-  if (Date.now() > draft.expires) { pendingRegistrations.delete(sessionId); return res.status(400).json({ error: 'That code has expired. Request a new one.' }); }
-  if (String(code || '').trim() !== draft.code) return res.status(401).json({ error: "That code doesn't match." });
-  try {
-    const employees = (await readStorageValue('employees')) || [];
-    if (employees.some((e) => (e.name || '').toLowerCase() === draft.name.toLowerCase())) {
-      pendingRegistrations.delete(sessionId);
-      return res.status(409).json({ error: 'An account with that name already exists.' });
-    }
-    const emp = {
-      id: makeEmployeeId(),
-      name: draft.name, email: draft.email, pinHash: await bcrypt.hash(draft.pin, 10), emailVerified: true,
-      title: '', departmentId: null, employmentType: 'Full-time', roles: ['Employee'],
-      isAdmin: false, isSuperAdmin: false, active: false, pendingApproval: true,
-      joinedDate: new Date().toISOString().slice(0, 10),
-    };
-    employees.push(emp);
-    await writeStorageValue('employees', employees);
-    broadcastUpdate('employees', stripCreds(employees));
-    pendingRegistrations.delete(sessionId);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'registration failed' });
-  }
-});
-
 /* ---------------- Generic key/value storage (mirrors the app's loadKey/saveKey) ---------------- */
 
 app.get('/api/storage', async (req, res) => {
@@ -635,11 +554,11 @@ app.get('/api/storage', async (req, res) => {
 });
 
 // Reads stay open (unauthenticated) for now — locking these down would also
-// require rebuilding registration/forgot-PIN as dedicated backend endpoints
-// (they now are — see above). The important fix already applied: that list
-// no longer contains anyone's actual PIN (see sanitizeEmployeePins), and
-// every WRITE below now requires either a real per-user token or one of the
-// two narrowly-validated anonymous shapes. That's what stopped your data
+// require rebuilding forgot-PIN as a dedicated backend endpoint (it now is
+// — see above). The important fix already applied: that list no longer
+// contains anyone's actual PIN (see sanitizeEmployeePins), and every WRITE
+// below now requires either a real per-user token or the one
+// narrowly-validated anonymous shape. That's what stopped your data
 // from being wipeable by anyone who finds this URL.
 app.get('/api/storage/:key', async (req, res) => {
   try {
@@ -669,6 +588,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
 
   try {
     let newlyApproved = [];
+    let newlyDeactivated = [];
     if (key === 'employees') {
       const current = (await readStorageValue('employees')) || [];
       if (!isAdminToken) {
@@ -703,18 +623,29 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
       }
       value = await sanitizeEmployeePins(value); // never persist a plaintext PIN, whoever wrote it
 
-      // Detect a self-registration flipping from pending -> approved, so the
+      // Detect someone being reactivated after a deactivation, so the
       // welcome/onboarding email (PWA install steps, role, agreement notice)
-      // goes out the moment an admin actually approves someone — this is the
-      // only place that transition happens, since there's no separate
-      // "approve" endpoint; an admin just edits the pendingApproval/active
-      // flags on the full employees array and re-saves it.
+      // goes out again the moment an admin flips them back to active — this
+      // is the only place that transition happens, since there's no
+      // separate "reactivate" endpoint; an admin just edits the active flag
+      // on the full employees array and re-saves it.
       newlyApproved = value.filter((emp) => {
         const before = currentById.get(emp.id);
         if (!before) return false;
-        const wasPending = before.pendingApproval === true || before.active === false;
-        const nowApproved = emp.pendingApproval !== true && emp.active !== false;
+        const wasPending = before.active === false;
+        const nowApproved = emp.active !== false;
         return wasPending && nowApproved;
+      });
+
+      // Symmetric detection for the opposite transition: someone just got
+      // deactivated. Sends the "your account was deactivated, contact your
+      // admin" email and (via requireAuth on every other route) means their
+      // existing token stops working the moment they're next checked, since
+      // active===false is enforced on login and on every admin-gated route.
+      newlyDeactivated = value.filter((emp) => {
+        const before = currentById.get(emp.id);
+        if (!before) return false;
+        return before.active !== false && emp.active === false;
       });
     } else if (ADMIN_ONLY_WRITE_KEYS.has(key)) {
       if (!isAdminToken) return res.status(403).json({ error: `Only an admin can write "${key}".` });
@@ -745,6 +676,9 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
     }
     if (newlyApproved.length) {
       newlyApproved.forEach((emp) => sendWelcomeEmail(emp).catch((e) => console.error('[welcome-email]', e.message)));
+    }
+    if (newlyDeactivated.length) {
+      newlyDeactivated.forEach((emp) => sendDeactivatedEmail(emp).catch((e) => console.error('[deactivated-email]', e.message)));
     }
   } catch (e) {
     console.error(e);
