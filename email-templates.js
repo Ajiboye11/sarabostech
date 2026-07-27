@@ -195,7 +195,7 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
     ])}
     ${installStepBlock('💻 Desktop (Chrome / Edge)', [
       `Open <strong>${escapeHtml(loginUrl)}</strong>.`,
-      'Click the <strong>install icon</strong> in the address bar (a small monitor with a down arrow), or open the <strong>⋮ / … menu</strong> and choose <strong>Install ${escapeHtml(BRAND.companyName)}</strong>.',
+      `Click the <strong>install icon</strong> in the address bar (a small monitor with a down arrow), or open the <strong>⋮ / … menu</strong> and choose <strong>Install ${escapeHtml(BRAND.companyName)}</strong>.`,
       'Click <strong>Install</strong> in the prompt.',
       'The app opens in its own window and appears in your Start Menu / Applications / Dock.',
     ])}
