@@ -15,6 +15,7 @@ if (missing.length) {
 const JWT_SECRET = process.env.JWT_SECRET;
 const TOKEN_TTL = process.env.TOKEN_TTL_HOURS ? `${Number(process.env.TOKEN_TTL_HOURS)}h` : '12h';
 const PORT = process.env.PORT || 8787;
+const APP_URL = process.env.APP_URL || '';
 
 // Only this email can ever hold Super Admin — enforced below at the actual
 // database-write level (validateSuperAdminIntegrity), not just at signup, so
@@ -115,11 +116,29 @@ function validateSuperAdminIntegrity(employees) {
 async function sendEmailInternal(payload) {
   try {
     await fetch(`http://localhost:${PORT}/api/send-email`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appUrl: APP_URL, ...payload }),
     });
   } catch (e) {
     console.error('[verify-email] send failed (non-fatal to the caller, but they will not receive a code)', e.message);
   }
+}
+
+/* Fires the onboarding "welcome" email for one employee — install-the-PWA
+   steps, their role, and the reminder that a signed agreement is required.
+   Called (a) right after an admin directly adds someone via /api/employees,
+   since they're active immediately, and (b) from the generic employees
+   write route below, the moment a self-registered account flips from
+   pending -> approved. Silently does nothing if there's no email on file. */
+async function sendWelcomeEmail(emp) {
+  if (!emp || !emp.email) return;
+  await sendEmailInternal({
+    type: 'welcome',
+    to: emp.email,
+    name: emp.name,
+    title: emp.title,
+    roles: emp.roles,
+    isAdmin: !!emp.isAdmin,
+  });
 }
 function makeVerificationCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
 function makeSessionId() { return 'bs_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
@@ -257,6 +276,7 @@ app.post('/api/auth/bootstrap/confirm', async (req, res) => {
     await writeStorageValue('companyInitialized', true);
     pendingBootstraps.delete(sessionId);
     const token = signToken(emp, true);
+    sendWelcomeEmail(emp).catch((e) => console.error('[welcome-email]', e.message));
     res.json({ token, employee: safeEmployee(emp) });
   } catch (e) {
     console.error(e);
@@ -445,6 +465,9 @@ app.post('/api/employees', requireAdmin, async (req, res) => {
     employees.push(emp);
     await writeStorageValue('employees', employees);
     broadcastUpdate('employees', stripCreds(employees));
+    // This account is active immediately (unlike a self-registration, which
+    // waits for approval below) — send the welcome/onboarding email now.
+    sendWelcomeEmail(emp).catch((e) => console.error('[welcome-email]', e.message));
     res.json({ employee: safeEmployee(emp) });
   } catch (e) {
     console.error(e);
@@ -645,6 +668,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
   const isAdminToken = !!(req.user && (req.user.isAdmin || req.user.isSuperAdmin));
 
   try {
+    let newlyApproved = [];
     if (key === 'employees') {
       const current = (await readStorageValue('employees')) || [];
       if (!isAdminToken) {
@@ -678,6 +702,20 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
         return res.status(403).json({ error: `Only ${SUPER_ADMIN_EMAIL} may hold Super Admin.` });
       }
       value = await sanitizeEmployeePins(value); // never persist a plaintext PIN, whoever wrote it
+
+      // Detect a self-registration flipping from pending -> approved, so the
+      // welcome/onboarding email (PWA install steps, role, agreement notice)
+      // goes out the moment an admin actually approves someone — this is the
+      // only place that transition happens, since there's no separate
+      // "approve" endpoint; an admin just edits the pendingApproval/active
+      // flags on the full employees array and re-saves it.
+      newlyApproved = value.filter((emp) => {
+        const before = currentById.get(emp.id);
+        if (!before) return false;
+        const wasPending = before.pendingApproval === true || before.active === false;
+        const nowApproved = emp.pendingApproval !== true && emp.active !== false;
+        return wasPending && nowApproved;
+      });
     } else if (ADMIN_ONLY_WRITE_KEYS.has(key)) {
       if (!isAdminToken) return res.status(403).json({ error: `Only an admin can write "${key}".` });
     } else {
@@ -704,6 +742,9 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
     broadcastUpdate(key, key === 'employees' ? stripCreds(value) : value);
     if (key === 'notifications' || key === 'announcements') {
       handlePushForNewItems(key, value).catch((e) => console.error('[push]', e.message));
+    }
+    if (newlyApproved.length) {
+      newlyApproved.forEach((emp) => sendWelcomeEmail(emp).catch((e) => console.error('[welcome-email]', e.message)));
     }
   } catch (e) {
     console.error(e);
