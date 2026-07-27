@@ -357,31 +357,36 @@ const ADMIN_ONLY_WRITE_KEYS = new Set([
 ]);
 
 /* The "forgot PIN" flow needs to write to 'employees' before the person has
-   ever logged in — there's no token to check yet. Rather than trust any
-   unauthenticated write to that key, this validates the *shape* of the
-   change itself, so the only thing an anonymous caller can ever do to the
-   employee list is change exactly one existing employee's PIN and nothing
-   else (a forgot-PIN reset). Anything else — adding, editing roles,
-   activating/deactivating someone, removing an employee, touching more than
-   one record, replacing the whole list — is rejected unless the caller has
-   an admin/super-admin token.
-
-   NOTE: as of the dedicated /api/employees, /api/auth/pin/change, and
-   /api/auth/forgot/* endpoints below, the frontend no longer needs to hit
-   this path at all. Kept as defense in depth for any other/older client
-   still POSTing the full list directly. */
+   ever logged in — there's no token to check yet. And several profile
+   self-service actions (verifying an email, uploading an avatar, toggling a
+   notification preference, dismissing the one-time onboarding modal) are
+   normal things for a logged-in non-admin to do to their OWN record, without
+   needing an admin token. Rather than trust any write to this key though,
+   this validates the *shape* of the change: exactly one existing record may
+   change, and only in fields that particular caller is allowed to touch —
+   see SELF_SERVICE_EMPLOYEE_FIELDS below. Anything else — adding someone,
+   editing roles/title/department, activating/deactivating, removing an
+   employee, touching more than one record, granting admin, replacing the
+   whole list — is rejected unless the caller has an admin/super-admin
+   token. */
+// Fields an ordinary (non-admin, logged-in) employee may change on their OWN
+// record via this generic route. Everything else — name, title, roles,
+// department, manager, employment type, active flag, isAdmin/isSuperAdmin,
+// joined date, id — requires an admin token, even for your own account, so a
+// compromised non-admin session can never self-promote or falsify HR data.
+const SELF_SERVICE_EMPLOYEE_FIELDS = new Set([
+  'pin', 'pinHash', 'email', 'emailVerified', 'avatarDataUrl', 'notifPrefs', 'needsOnboarding',
+]);
 function anonymousEmployeeWriteIsAllowed(oldArr, newArr, callerSub) {
   if (!Array.isArray(oldArr) || !Array.isArray(newArr)) return false;
   const oldById = new Map(oldArr.map((e) => [e.id, e]));
   const newById = new Map(newArr.map((e) => [e.id, e]));
 
-  if (newArr.length !== oldArr.length) return false; // no additions/removals allowed anonymously
+  if (newArr.length !== oldArr.length) return false; // no additions/removals allowed this way
 
-  // A PIN-only change to exactly one existing record — either the
-  // anonymous forgot-PIN flow, or a logged-in non-admin changing their own
-  // PIN from profile settings. If the caller IS logged in (has a token),
-  // they may only ever touch their OWN record this way — a logged-in
-  // non-admin can never modify a coworker's PIN.
+  // Exactly one existing record may change, and — for a logged-in caller —
+  // only in fields on the SELF_SERVICE_EMPLOYEE_FIELDS allowlist; a fully
+  // anonymous caller (no token, i.e. forgot-PIN) may only ever touch the PIN.
   let changedCount = 0, changedId = null;
   for (const [id, oldE] of oldById) {
     const newE = newById.get(id);
@@ -390,9 +395,15 @@ function anonymousEmployeeWriteIsAllowed(oldArr, newArr, callerSub) {
     changedCount++;
     changedId = id;
     if (changedCount > 1) return false;
-    const oldRest = { ...oldE }; delete oldRest.pin; delete oldRest.pinHash;
-    const newRest = { ...newE }; delete newRest.pin; delete newRest.pinHash;
-    if (JSON.stringify(oldRest) !== JSON.stringify(newRest)) return false; // something besides the PIN changed
+
+    // Check every field that actually differs (covers additions, removals,
+    // and value changes alike) against what this caller is allowed to touch.
+    const allKeys = new Set([...Object.keys(oldE), ...Object.keys(newE)]);
+    for (const k of allKeys) {
+      if (JSON.stringify(oldE[k]) === JSON.stringify(newE[k])) continue;
+      if (!callerSub) { if (k !== 'pin' && k !== 'pinHash') return false; continue; } // fully anonymous (forgot-PIN): PIN only
+      if (!SELF_SERVICE_EMPLOYEE_FIELDS.has(k)) return false; // logged-in non-admin: allowlisted self-service fields only
+    }
   }
   if (changedCount !== 1) return false;
   if (callerSub && changedId !== callerSub) return false; // logged in as someone else — not allowed
