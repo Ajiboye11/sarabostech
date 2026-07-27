@@ -6,9 +6,8 @@
  * match the app's brand blue (#2952CC). Each function returns { subject, html }.
  *
  * Require this from email-server-addon.js:
- *   const { buildEmail } = require('./email-templates');
+ * const { buildEmail } = require('./email-templates');
  */
-
 const BRAND = {
   blue: '#2952CC',
   blueDark: '#1E3F9E',
@@ -21,6 +20,8 @@ const BRAND = {
   companyName: 'Sarab Technologies',
 };
 
+const DEFAULT_APP_URL = 'https://www.sarabtechnologies.name.ng';
+
 function escapeHtml(str) {
   return String(str == null ? '' : str).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -29,7 +30,8 @@ function escapeHtml(str) {
 
 /** Shared wrapper: logo header, white card, footer. `bodyHtml` goes inside the card. */
 function shell({ appUrl, preheader, bodyHtml }) {
-  const logoUrl = appUrl ? `${appUrl.replace(/\/$/, '')}/assets/ST_Icon.png` : '';
+  const base = (appUrl || DEFAULT_APP_URL).replace(/\/$/, '');
+  const logoUrl = `${base}/assets/ST_Icon.png`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -44,7 +46,7 @@ function shell({ appUrl, preheader, bodyHtml }) {
     <tr><td align="center">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;">
         <tr><td style="padding:0 4px 20px;text-align:center;">
-          ${logoUrl ? `<img src="${logoUrl}" width="40" height="40" alt="${escapeHtml(BRAND.companyName)}" style="border-radius:9px;display:inline-block;vertical-align:middle;">` : ''}
+          <img src="${logoUrl}" width="40" height="40" alt="${escapeHtml(BRAND.companyName)}" style="border-radius:9px;display:inline-block;vertical-align:middle;">
           <span style="font-size:16px;font-weight:700;color:${BRAND.text};margin-left:8px;vertical-align:middle;">${escapeHtml(BRAND.companyName)}</span>
         </td></tr>
         <tr><td style="background:#FFFFFF;border:1px solid ${BRAND.border};border-radius:14px;padding:36px 32px;box-shadow:0 4px 24px rgba(16,24,40,0.06);">
@@ -151,22 +153,21 @@ function chatTemplate({ name, from, preview, deepLink, appUrl }) {
 /**
  * Sent the moment an account becomes active — a direct admin add, or an
  * admin approving a self-registration. Covers three things at once:
- *  1) install the PWA (device-specific steps, since there's no single
- *     universal "install" button that works the same on iOS/Android/desktop),
- *  2) what their role/title actually is,
- *  3) that a signed agreement is required before the rest of the app unlocks.
+ * 1) install the PWA (device-specific steps, since there's no single
+ * universal "install" button that works the same on iOS/Android/desktop),
+ * 2) what their role/title actually is,
+ * 3) that a signed agreement is required before the rest of the app unlocks.
  */
 function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
   const firstName = escapeHtml((name || '').split(/\s+/)[0] || '');
   const roleLine = title || (Array.isArray(roles) && roles.length ? roles.join(', ') : (isAdmin ? 'Admin' : 'Employee'));
-  const loginUrl = appUrl ? appUrl.replace(/\/$/, '') + '/' : '#';
-
+  const base = (appUrl || DEFAULT_APP_URL).replace(/\/$/, '');
+  const loginUrl = base + '/';
   const body = `
     <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Welcome to ${escapeHtml(BRAND.companyName)}, ${firstName}!</h1>
     <p style="margin:0 0 20px;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
       Your account has been created. Here's what to do next.
     </p>
-
     <div style="background:${BRAND.bg};border:1px solid ${BRAND.border};border-radius:10px;padding:14px 16px;margin-bottom:22px;">
       <div style="font-size:12px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:${BRAND.blue};margin-bottom:4px;">Your role</div>
       <div style="font-size:15px;font-weight:700;color:${BRAND.text};">${escapeHtml(roleLine)}</div>
@@ -174,7 +175,6 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
         This determines what you'll see and what you're responsible for inside the app — your admin can adjust it any time from your profile.
       </p>
     </div>
-
     <h2 style="margin:0 0 10px;font-size:15px;color:${BRAND.text};">1. Install the app on your device</h2>
     <p style="margin:0 0 14px;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
       ${escapeHtml(BRAND.companyName)} runs as a Progressive Web App (PWA) — no app store needed. Install it so it opens like a regular app and can send you notifications.
@@ -199,19 +199,16 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
       'Click <strong>Install</strong> in the prompt.',
       'The app opens in its own window and appears in your Start Menu / Applications / Dock.',
     ])}
-
     <h2 style="margin:22px 0 10px;font-size:15px;color:${BRAND.text};">2. Sign in and complete onboarding</h2>
     <p style="margin:0 0 8px;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
       The first time you sign in you'll be guided through a short onboarding walkthrough.
     </p>
-
     <div style="background:${BRAND.amber}0D;border:1px solid #FBE3C6;border-radius:10px;padding:14px 16px;margin:10px 0 18px;">
       <div style="font-size:13px;font-weight:700;color:${BRAND.amber};margin-bottom:4px;">⚠️ Required: sign your agreement</div>
       <p style="margin:0;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
         You'll be asked to review and sign a company agreement. Until it's signed, the rest of the app stays locked and you'll only be able to see the agreement page — so please read and sign it as soon as you're in.
       </p>
     </div>
-
     ${button('Open ' + BRAND.companyName, loginUrl)}
   `;
   return {
