@@ -347,10 +347,12 @@ function requireAdmin(req, res, next) {
 }
 
 // Keys only an admin/super-admin token may write to — HR, payroll, and
-// company-configuration data. ('employees' and 'agreementSignatures' are
-// handled separately below: employees needs a narrow anonymous carve-out
-// for forgot-PIN, and agreementSignatures needs a narrow non-admin
-// carve-out so an ordinary employee can sign their own agreement.)
+// company-configuration data. ('employees', 'agreementSignatures',
+// 'documents', 'docFolders', and 'peopleCases' are handled separately below
+// — each needs its own narrow non-admin carve-out: an ordinary employee can
+// sign their own agreement, upload/manage their own files, open a project's
+// folder for the first time, and request/track their own leave — without
+// ever touching anyone else's records.)
 const ADMIN_ONLY_WRITE_KEYS = new Set([
   'departments', 'settings', 'automations', 'agreements',
   'payrollRuns', 'budgets', 'invoices', 'companyInitialized',
@@ -440,6 +442,160 @@ function signatureWriteIsAllowed(oldArr, newArr, callerSub) {
   }
 
   return added.employeeId === callerSub; // can only ever sign as yourself
+}
+
+/* ==================================================================
+   Project-membership helpers — mirror the frontend's projectTeamIds(p)
+   exactly (teamIds + leadId), so the write-guards below enforce the same
+   "who belongs to this project" boundary the client uses to decide what to
+   show. Used by the 'documents'/'docFolders' guards further down. ---- */
+function projectTeamIdsServer(p) {
+  const ids = new Set(Array.isArray(p.teamIds) ? p.teamIds : []);
+  if (p.leadId) ids.add(p.leadId);
+  return ids;
+}
+function isOnProjectTeamServer(project, employeeId) {
+  return !!(project && employeeId && (project.leadId === employeeId || projectTeamIdsServer(project).has(employeeId)));
+}
+
+/* ---- 'docFolders' write guard ----
+   A project's Documents folder gets created lazily, client-side, the first
+   time anyone on that project's team opens its Files tab (ensureProjectDocFolder)
+   — so this key does need a non-admin carve-out. The ONLY thing a non-admin
+   caller may ever do here is add exactly one new folder tied to a project
+   they actually belong to. Editing or deleting any existing folder, or
+   creating a folder that isn't linked to one of their own projects, requires
+   an admin token. */
+async function docFoldersWriteIsAllowed(oldArr, newArr, callerSub) {
+  if (!callerSub) return false;
+  if (!Array.isArray(oldArr)) oldArr = [];
+  if (!Array.isArray(newArr)) return false;
+  if (newArr.length !== oldArr.length + 1) return false; // exactly one addition, no edits/removals
+
+  const oldIds = new Set(oldArr.map((f) => f && f.id));
+  let added = null;
+  for (const f of newArr) {
+    if (f && oldIds.has(f.id)) continue;
+    if (added) return false; // more than one new folder
+    added = f;
+  }
+  if (!added) return false;
+
+  const newById = new Map(newArr.map((f) => [f && f.id, f]));
+  for (const old of oldArr) {
+    const match = newById.get(old.id);
+    if (!match || JSON.stringify(old) !== JSON.stringify(match)) return false; // every existing folder untouched
+  }
+
+  if (!added.projectId) return false; // non-admins can only ever auto-create PROJECT folders
+  const projects = (await readStorageValue('projects')) || [];
+  const p = projects.find((pr) => pr.id === added.projectId);
+  return isOnProjectTeamServer(p, callerSub);
+}
+
+/* ---- 'documents' write guard ----
+   In one save, a non-admin caller may:
+   - add exactly one new document, uploaded as themselves, filed either
+     unfiled / into a non-project folder, or into a project folder for a
+     project they're actually on (mirrors canAddProjectFile); or
+   - edit or delete a document they uploaded themselves, or one that lives in
+     a project they lead (mirrors canManageDocument) — and if editing, may
+     only move it into a folder they have the same access to; or
+   - touch nothing else.
+   Anything else — someone else's file in a project you don't lead, filing
+   into a project you're not on, more than one change per save — requires an
+   admin token. This is the actual enforcement of the "only the project team
+   + lead can see/add to that folder" rule; the frontend's canAccessDocument
+   only controls what's rendered, not what the API will accept. */
+async function documentsWriteIsAllowed(oldArr, newArr, callerSub) {
+  if (!callerSub) return false;
+  if (!Array.isArray(oldArr)) oldArr = [];
+  if (!Array.isArray(newArr)) return false;
+
+  const folders = (await readStorageValue('docFolders')) || [];
+  const folderById = new Map(folders.map((f) => [f.id, f]));
+  const projects = (await readStorageValue('projects')) || [];
+  const projectById = new Map(projects.map((p) => [p.id, p]));
+
+  function folderAccessible(folderId) {
+    const f = folderId ? folderById.get(folderId) : null;
+    if (!f || !f.projectId) return true; // unfiled or a non-project folder — open to any logged-in employee
+    return isOnProjectTeamServer(projectById.get(f.projectId), callerSub);
+  }
+  function canManage(doc) {
+    if (!doc) return false;
+    if (doc.uploadedBy === callerSub) return true;
+    const f = doc.folderId ? folderById.get(doc.folderId) : null;
+    const p = f && f.projectId ? projectById.get(f.projectId) : null;
+    return !!(p && p.leadId === callerSub);
+  }
+
+  const oldById = new Map(oldArr.map((d) => [d.id, d]));
+  const newById = new Map(newArr.map((d) => [d.id, d]));
+  let changedCount = 0;
+
+  for (const [id, oldD] of oldById) {
+    const newD = newById.get(id);
+    if (!newD) { // deletion
+      if (!canManage(oldD)) return false;
+      changedCount++;
+      continue;
+    }
+    if (JSON.stringify(oldD) === JSON.stringify(newD)) continue;
+    if (!canManage(oldD)) return false;
+    if (newD.folderId !== oldD.folderId && !folderAccessible(newD.folderId)) return false;
+    changedCount++;
+  }
+  for (const [id, newD] of newById) {
+    if (oldById.has(id)) continue; // addition
+    if (newD.uploadedBy !== callerSub) return false; // must upload as yourself
+    if (!folderAccessible(newD.folderId)) return false; // and only where you actually have access
+    changedCount++;
+  }
+  return changedCount <= 1;
+}
+
+/* ---- 'peopleCases' write guard ----
+   Anyone may add exactly one new case for THEMSELVES (a leave/escalation/
+   dispute request) or append a note to their own case. Changing a case's
+   status, or touching anyone else's case at all, is reserved for the Super
+   Admin (any role) or an Admin who also holds the HR role — mirrors
+   isAdminHR() on the frontend. The JWT only carries isAdmin/isSuperAdmin,
+   not roles, so an admin caller's HR role is looked up fresh from the
+   current 'employees' record rather than trusted from the client. */
+async function callerIsAdminHR(callerSub, isSuperAdminTok, isAdminTok) {
+  if (isSuperAdminTok) return true;
+  if (!isAdminTok) return false;
+  const employees = (await readStorageValue('employees')) || [];
+  const me = employees.find((e) => e.id === callerSub);
+  return !!(me && Array.isArray(me.roles) && me.roles.includes('HR'));
+}
+async function peopleCasesWriteIsAllowed(oldArr, newArr, callerSub, isSuperAdminTok, isAdminTok) {
+  if (!callerSub) return false;
+  if (!Array.isArray(oldArr)) oldArr = [];
+  if (!Array.isArray(newArr)) return false;
+  if (await callerIsAdminHR(callerSub, isSuperAdminTok, isAdminTok)) return true; // full triage access, any case
+
+  if (newArr.length < oldArr.length) return false; // a plain employee can never delete a case
+  const oldById = new Map(oldArr.map((c) => [c.id, c]));
+  const newById = new Map(newArr.map((c) => [c.id, c]));
+  let changedCount = 0;
+
+  for (const [id, oldC] of oldById) {
+    const newC = newById.get(id);
+    if (!newC) return false; // deletion — HR/Super Admin only
+    if (JSON.stringify(oldC) === JSON.stringify(newC)) continue;
+    if (oldC.employeeId !== callerSub) return false; // not your case
+    if (oldC.status !== newC.status) return false; // only HR/Super Admin can change status
+    changedCount++;
+  }
+  let added = 0;
+  for (const [id, newC] of newById) {
+    if (oldById.has(id)) continue;
+    if (newC.employeeId !== callerSub) return false; // can only request a case for yourself
+    added++;
+  }
+  return (changedCount + added) <= 1;
 }
 
 /* ==================================================================
@@ -588,7 +744,7 @@ app.post('/api/auth/forgot/confirm', async (req, res) => {
 
 /* ---------------- Generic key/value storage (mirrors the app's loadKey/saveKey) ---------------- */
 
-app.get('/api/storage', async (req, res) => {
+app.get('/api/storage', requireAuth, async (req, res) => {
   try {
     const prefix = req.query.prefix || '';
     const [rows] = await pool.query('SELECT storage_key FROM app_storage WHERE storage_key LIKE ?', [`${prefix}%`]);
@@ -599,14 +755,18 @@ app.get('/api/storage', async (req, res) => {
   }
 });
 
-// Reads stay open (unauthenticated) for now — locking these down would also
-// require rebuilding forgot-PIN as a dedicated backend endpoint (it now is
-// — see above). The important fix already applied: that list no longer
-// contains anyone's actual PIN (see sanitizeEmployeePins), and every WRITE
-// below now requires either a real per-user token or the one
-// narrowly-validated anonymous shape. That's what stopped your data
-// from being wipeable by anyone who finds this URL.
-app.get('/api/storage/:key', async (req, res) => {
+// Reads now require a valid session token — the frontend's loadKey() already
+// sends one on every call (see authHeaders()), so this was safe to close.
+// Before this, ANY key — documents, peopleCases, projects (revenue/expenses),
+// even employees minus creds — was one unauthenticated GET away for anyone
+// who found this URL, regardless of what the UI chose to render. The
+// per-record scoping below (who can see which project's folder, whose case
+// is whose) still only happens on WRITE; reads return the full stored value
+// to any signed-in caller. If a specific key needs to be filtered per-caller
+// on read too (e.g. so a non-PM can't fetch another project's private
+// documents directly), that needs to be added per-key here — this change
+// only closes the "no login at all" hole.
+app.get('/api/storage/:key', requireAuth, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT value FROM app_storage WHERE storage_key=?', [req.params.key]);
     if (!rows.length) return res.json({ key: req.params.key, value: null });
@@ -631,6 +791,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
   if (value === undefined) return res.status(400).json({ error: 'body.value is required' });
 
   const isAdminToken = !!(req.user && (req.user.isAdmin || req.user.isSuperAdmin));
+  const callerSub = req.user ? req.user.sub : null;
 
   try {
     let newlyApproved = [];
@@ -671,7 +832,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
       }
 
       if (!isAdminToken) {
-        if (!anonymousEmployeeWriteIsAllowed(current, value, req.user ? req.user.sub : null)) {
+        if (!anonymousEmployeeWriteIsAllowed(current, value, callerSub)) {
           return res.status(403).json({ error: 'Sign in as an admin to make this change to the employee list.' });
         }
       }
@@ -707,9 +868,35 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
     } else if (key === 'agreementSignatures') {
       if (!isAdminToken) {
         const current = (await readStorageValue('agreementSignatures')) || [];
-        if (!signatureWriteIsAllowed(current, value, req.user ? req.user.sub : null)) {
+        if (!signatureWriteIsAllowed(current, value, callerSub)) {
           return res.status(403).json({ error: 'You can only sign an agreement as yourself.' });
         }
+      }
+    } else if (key === 'documents') {
+      // A project's Documents folder is a hard access boundary: only the
+      // project's team/lead (or an admin) may add to or manage a file inside
+      // it — this is what actually enforces that, not just the frontend's
+      // rendering logic. See documentsWriteIsAllowed above.
+      if (!isAdminToken) {
+        const current = (await readStorageValue('documents')) || [];
+        if (!(await documentsWriteIsAllowed(current, value, callerSub))) {
+          return res.status(403).json({ error: "You can only add your own files, or manage files you uploaded or lead the project for — and only into a project folder you're actually on." });
+        }
+      }
+    } else if (key === 'docFolders') {
+      if (!isAdminToken) {
+        const current = (await readStorageValue('docFolders')) || [];
+        if (!(await docFoldersWriteIsAllowed(current, value, callerSub))) {
+          return res.status(403).json({ error: 'You can only create a folder for a project you belong to — ask an admin for anything else.' });
+        }
+      }
+    } else if (key === 'peopleCases') {
+      // Case triage (viewing/changing status/resolving) is the Super Admin's
+      // to do regardless of role, or an Admin's as long as they also hold
+      // the HR role — everyone else may only request their own case or add
+      // a note to it. See peopleCasesWriteIsAllowed above.
+      if (!(await peopleCasesWriteIsAllowed((await readStorageValue('peopleCases')) || [], value, callerSub, !!(req.user && req.user.isSuperAdmin), isAdminToken))) {
+        return res.status(403).json({ error: 'You can only submit or update your own leave/escalation/dispute case.' });
       }
     } else if (ADMIN_ONLY_WRITE_KEYS.has(key)) {
       if (!isAdminToken) return res.status(403).json({ error: `Only an admin can write "${key}".` });
@@ -753,7 +940,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
 app.delete('/api/storage/:key', requireAuth, async (req, res) => {
   const key = req.params.key;
   const isAdminToken = !!(req.user.isAdmin || req.user.isSuperAdmin);
-  if ((key === 'employees' || key === 'agreementSignatures' || ADMIN_ONLY_WRITE_KEYS.has(key)) && !isAdminToken) {
+  if ((key === 'employees' || key === 'agreementSignatures' || key === 'documents' || key === 'docFolders' || key === 'peopleCases' || ADMIN_ONLY_WRITE_KEYS.has(key)) && !isAdminToken) {
     return res.status(403).json({ error: `Only an admin can delete "${key}".` });
   }
   try {
