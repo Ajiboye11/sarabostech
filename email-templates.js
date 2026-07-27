@@ -17,6 +17,7 @@ const BRAND = {
   border: '#E3E6EB',
   bg: '#F5F6F8',
   green: '#067647',
+  amber: '#B54708',
   companyName: 'Sarab Technologies',
 };
 
@@ -68,6 +69,17 @@ function button(label, href) {
       <a href="${href}" style="display:inline-block;padding:12px 24px;font-size:14px;font-weight:700;color:#FFFFFF;text-decoration:none;border-radius:9px;">${escapeHtml(label)}</a>
     </td></tr>
   </table>`;
+}
+
+/** One numbered device-install step block, used inside the welcome email. */
+function installStepBlock(deviceLabel, steps) {
+  return `
+    <div style="margin-bottom:14px;">
+      <div style="font-size:13px;font-weight:700;color:${BRAND.text};margin-bottom:6px;">${escapeHtml(deviceLabel)}</div>
+      <ol style="margin:0;padding-left:18px;font-size:13px;color:${BRAND.textDim};line-height:1.7;">
+        ${steps.map((s) => `<li>${s}</li>`).join('')}
+      </ol>
+    </div>`;
 }
 
 /* ---------------- Individual templates ---------------- */
@@ -136,6 +148,78 @@ function chatTemplate({ name, from, preview, deepLink, appUrl }) {
   };
 }
 
+/**
+ * Sent the moment an account becomes active — a direct admin add, or an
+ * admin approving a self-registration. Covers three things at once:
+ *  1) install the PWA (device-specific steps, since there's no single
+ *     universal "install" button that works the same on iOS/Android/desktop),
+ *  2) what their role/title actually is,
+ *  3) that a signed agreement is required before the rest of the app unlocks.
+ */
+function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
+  const firstName = escapeHtml((name || '').split(/\s+/)[0] || '');
+  const roleLine = title || (Array.isArray(roles) && roles.length ? roles.join(', ') : (isAdmin ? 'Admin' : 'Employee'));
+  const loginUrl = appUrl ? appUrl.replace(/\/$/, '') + '/' : '#';
+
+  const body = `
+    <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Welcome to ${escapeHtml(BRAND.companyName)}, ${firstName}!</h1>
+    <p style="margin:0 0 20px;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
+      Your account has been created. Here's what to do next.
+    </p>
+
+    <div style="background:${BRAND.bg};border:1px solid ${BRAND.border};border-radius:10px;padding:14px 16px;margin-bottom:22px;">
+      <div style="font-size:12px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:${BRAND.blue};margin-bottom:4px;">Your role</div>
+      <div style="font-size:15px;font-weight:700;color:${BRAND.text};">${escapeHtml(roleLine)}</div>
+      <p style="margin:6px 0 0;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
+        This determines what you'll see and what you're responsible for inside the app — your admin can adjust it any time from your profile.
+      </p>
+    </div>
+
+    <h2 style="margin:0 0 10px;font-size:15px;color:${BRAND.text};">1. Install the app on your device</h2>
+    <p style="margin:0 0 14px;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
+      ${escapeHtml(BRAND.companyName)} runs as a Progressive Web App (PWA) — no app store needed. Install it so it opens like a regular app and can send you notifications.
+    </p>
+    ${installStepBlock('📱 iPhone / iPad (Safari)', [
+      `Open <strong>${escapeHtml(loginUrl)}</strong> in <strong>Safari</strong> (must be Safari, not Chrome).`,
+      'Tap the <strong>Share</strong> icon (square with an arrow pointing up) in the toolbar.',
+      'Scroll down and tap <strong>Add to Home Screen</strong>.',
+      'Tap <strong>Add</strong> in the top-right corner.',
+      'Open the app from the new icon on your Home Screen.',
+    ])}
+    ${installStepBlock('🤖 Android (Chrome)', [
+      `Open <strong>${escapeHtml(loginUrl)}</strong> in <strong>Chrome</strong>.`,
+      'Tap the <strong>⋮</strong> menu in the top-right corner.',
+      'Tap <strong>Install app</strong> (or <strong>Add to Home screen</strong>).',
+      'Confirm by tapping <strong>Install</strong>.',
+      'Open the app from your Home Screen or app drawer.',
+    ])}
+    ${installStepBlock('💻 Desktop (Chrome / Edge)', [
+      `Open <strong>${escapeHtml(loginUrl)}</strong>.`,
+      'Click the <strong>install icon</strong> in the address bar (a small monitor with a down arrow), or open the <strong>⋮ / … menu</strong> and choose <strong>Install ${escapeHtml(BRAND.companyName)}</strong>.',
+      'Click <strong>Install</strong> in the prompt.',
+      'The app opens in its own window and appears in your Start Menu / Applications / Dock.',
+    ])}
+
+    <h2 style="margin:22px 0 10px;font-size:15px;color:${BRAND.text};">2. Sign in and complete onboarding</h2>
+    <p style="margin:0 0 8px;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
+      The first time you sign in you'll be guided through a short onboarding walkthrough.
+    </p>
+
+    <div style="background:${BRAND.amber}0D;border:1px solid #FBE3C6;border-radius:10px;padding:14px 16px;margin:10px 0 18px;">
+      <div style="font-size:13px;font-weight:700;color:${BRAND.amber};margin-bottom:4px;">⚠️ Required: sign your agreement</div>
+      <p style="margin:0;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
+        You'll be asked to review and sign a company agreement. Until it's signed, the rest of the app stays locked and you'll only be able to see the agreement page — so please read and sign it as soon as you're in.
+      </p>
+    </div>
+
+    ${button('Open ' + BRAND.companyName, loginUrl)}
+  `;
+  return {
+    subject: `Welcome to ${BRAND.companyName} — install the app & sign in`,
+    html: shell({ appUrl, preheader: `Install the app, review your role, and sign your agreement to get started.`, bodyHtml: body }),
+  };
+}
+
 /** Dispatch by type. Returns { subject, html } or throws for an unknown type. */
 function buildEmail(type, payload) {
   switch (type) {
@@ -143,6 +227,7 @@ function buildEmail(type, payload) {
     case 'reset-confirm': return resetConfirmTemplate(payload);
     case 'notification': return notificationTemplate(payload);
     case 'chat': return chatTemplate(payload);
+    case 'welcome': return welcomeTemplate(payload);
     default: throw new Error(`Unknown email type: ${type}`);
   }
 }
