@@ -347,10 +347,12 @@ function requireAdmin(req, res, next) {
 }
 
 // Keys only an admin/super-admin token may write to — HR, payroll, and
-// company-configuration data. ('employees' is handled separately below,
-// since the forgot-PIN flow needs a narrow anonymous carve-out.)
+// company-configuration data. ('employees' and 'agreementSignatures' are
+// handled separately below: employees needs a narrow anonymous carve-out
+// for forgot-PIN, and agreementSignatures needs a narrow non-admin
+// carve-out so an ordinary employee can sign their own agreement.)
 const ADMIN_ONLY_WRITE_KEYS = new Set([
-  'departments', 'settings', 'automations', 'agreements', 'agreementSignatures',
+  'departments', 'settings', 'automations', 'agreements',
   'payrollRuns', 'budgets', 'invoices', 'companyInitialized',
 ]);
 
@@ -397,6 +399,38 @@ function anonymousEmployeeWriteIsAllowed(oldArr, newArr, callerSub) {
   return true;
 }
 
+/* A non-admin employee needs to be able to sign an agreement — i.e. write to
+   'agreementSignatures' — but must never be able to touch anyone else's
+   signature (edit it, delete it, or forge one under a coworker's
+   employeeId). This mirrors anonymousEmployeeWriteIsAllowed's shape-based
+   approach: the ONLY change a non-admin caller may ever make to this key is
+   appending exactly one new signature record whose employeeId is their own. */
+function signatureWriteIsAllowed(oldArr, newArr, callerSub) {
+  if (!callerSub) return false; // must be logged in to sign anything
+  if (!Array.isArray(oldArr)) oldArr = [];
+  if (!Array.isArray(newArr)) return false;
+
+  if (newArr.length !== oldArr.length + 1) return false; // exactly one addition, no edits/removals
+
+  const oldIds = new Set(oldArr.map((s) => s && s.id));
+  let added = null;
+  for (const sig of newArr) {
+    if (sig && oldIds.has(sig.id)) continue; // an existing signature, untouched — fine
+    if (added) return false; // more than one new record — not allowed
+    added = sig;
+  }
+  if (!added) return false;
+
+  // Every pre-existing signature must be byte-for-byte unchanged.
+  const newById = new Map(newArr.map((s) => [s && s.id, s]));
+  for (const old of oldArr) {
+    const match = newById.get(old.id);
+    if (!match || JSON.stringify(old) !== JSON.stringify(match)) return false;
+  }
+
+  return added.employeeId === callerSub; // can only ever sign as yourself
+}
+
 /* ==================================================================
    Dedicated single-record credential endpoints.
 
@@ -419,8 +453,9 @@ function anonymousEmployeeWriteIsAllowed(oldArr, newArr, callerSub) {
       that still does a full-array save of 'employees' — see the merge
       in POST /api/storage/:key below — any employee in an incoming
       write that isn't explicitly changing its PIN has its real
-      pinHash restored from the server's current copy before the write
-      lands, so an ordinary HR edit can never wipe someone else's login.
+      pinHash restored from the server's current copy by id before the
+      write lands, so an ordinary HR edit can never wipe someone else's
+      login.
    ================================================================== */
 
 // Add a team member — admin only. Employee is created and hashed entirely
@@ -647,6 +682,13 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
         if (!before) return false;
         return before.active !== false && emp.active === false;
       });
+    } else if (key === 'agreementSignatures') {
+      if (!isAdminToken) {
+        const current = (await readStorageValue('agreementSignatures')) || [];
+        if (!signatureWriteIsAllowed(current, value, req.user ? req.user.sub : null)) {
+          return res.status(403).json({ error: 'You can only sign an agreement as yourself.' });
+        }
+      }
     } else if (ADMIN_ONLY_WRITE_KEYS.has(key)) {
       if (!isAdminToken) return res.status(403).json({ error: `Only an admin can write "${key}".` });
     } else {
@@ -689,7 +731,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
 app.delete('/api/storage/:key', requireAuth, async (req, res) => {
   const key = req.params.key;
   const isAdminToken = !!(req.user.isAdmin || req.user.isSuperAdmin);
-  if ((key === 'employees' || ADMIN_ONLY_WRITE_KEYS.has(key)) && !isAdminToken) {
+  if ((key === 'employees' || key === 'agreementSignatures' || ADMIN_ONLY_WRITE_KEYS.has(key)) && !isAdminToken) {
     return res.status(403).json({ error: `Only an admin can delete "${key}".` });
   }
   try {
