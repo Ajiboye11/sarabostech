@@ -148,9 +148,28 @@ function chatTemplate({ name, from, preview, deepLink, appUrl }) {
   };
 }
 
+function deactivatedTemplate({ name, appUrl }) {
+  const body = `
+    <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Your account has been deactivated</h1>
+    <p style="margin:0 0 8px;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
+      Hi ${escapeHtml(name || '')}, your ${escapeHtml(BRAND.companyName)} account has been deactivated by an admin.
+    </p>
+    <div style="background:#FEF3F2;border:1px solid #FECDCA;border-radius:10px;padding:14px 16px;margin:14px 0 18px;">
+      <p style="margin:0;font-size:13px;color:${BRAND.text};line-height:1.6;">
+        You will not be able to sign in while your account is deactivated. If you believe this is a mistake, please contact your admin directly.
+      </p>
+    </div>
+    <p style="margin:0;font-size:13px;color:#98A2B3;">This is a confirmation notice — no action is required from you right now.</p>
+  `;
+  return {
+    subject: `Your ${BRAND.companyName} account has been deactivated`,
+    html: shell({ appUrl, preheader: `Your account has been deactivated. Contact your admin if this is unexpected.`, bodyHtml: body }),
+  };
+}
+
 /**
- * Sent the moment an account becomes active — a direct admin add, or an
- * admin approving a self-registration. Covers three things at once:
+ * Sent the moment an admin directly adds a new team member. Covers three
+ * things at once:
  *  1) install the PWA (device-specific steps, since there's no single
  *     universal "install" button that works the same on iOS/Android/desktop),
  *  2) what their role/title actually is,
@@ -228,6 +247,7 @@ function buildEmail(type, payload) {
     case 'notification': return notificationTemplate(payload);
     case 'chat': return chatTemplate(payload);
     case 'welcome': return welcomeTemplate(payload);
+    case 'deactivated': return deactivatedTemplate(payload);
     default: throw new Error(`Unknown email type: ${type}`);
   }
 }
