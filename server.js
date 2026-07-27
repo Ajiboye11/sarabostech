@@ -123,6 +123,7 @@ async function sendEmailInternal(payload) {
 }
 function makeVerificationCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
 function makeSessionId() { return 'bs_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+function makeEmployeeId() { return 'emp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
 async function sanitizeEmployeePins(employees) {
   if (!Array.isArray(employees)) return employees;
@@ -133,6 +134,15 @@ async function sanitizeEmployeePins(employees) {
     }
   }
   return employees;
+}
+
+/* Strips a plaintext `pin` and/or `pinHash` off every response the client
+   ever sees for 'employees' — used both by the plain storage read route and
+   by every broadcastUpdate('employees', ...) call below, so the realtime
+   channel can never leak a credential either. */
+function stripCreds(employees) {
+  if (!Array.isArray(employees)) return employees;
+  return employees.map(({ pin, pinHash, ...rest }) => rest);
 }
 
 /* ==================================================================
@@ -150,6 +160,22 @@ function signToken(emp, remember) {
 function safeEmployee(e) {
   const { pin, pinHash, ...rest } = e;
   return rest;
+}
+
+/* Verifies a submitted PIN against a stored employee record. Transparently
+   upgrades a legacy plaintext `pin` to a `pinHash` the first time it's used
+   successfully — same behavior as before, just shared by every code path
+   that needs to check a PIN (login, PIN change, forgot-PIN), instead of
+   being duplicated (or skipped) in each one. Caller is responsible for
+   persisting `employees` afterward if this returns true and had to upgrade. */
+async function verifyEmployeePin(emp, submittedPin) {
+  if (emp.pinHash) return bcrypt.compare(String(submittedPin), emp.pinHash);
+  if (emp.pin !== undefined) {
+    const ok = String(emp.pin) === String(submittedPin);
+    if (ok) { emp.pinHash = await bcrypt.hash(String(submittedPin), 10); delete emp.pin; }
+    return ok;
+  }
+  return false;
 }
 
 // Pre-login: tells the client whether a company exists yet WITHOUT exposing
@@ -221,7 +247,7 @@ app.post('/api/auth/bootstrap/confirm', async (req, res) => {
     if (existing.length > 0) { pendingBootstraps.delete(sessionId); return res.status(409).json({ error: 'A company already exists.' }); }
     const pinHash = await bcrypt.hash(draft.pin, 10);
     const emp = {
-      id: 'emp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+      id: makeEmployeeId(),
       name: draft.name, pinHash, email: draft.email, emailVerified: true, title: draft.title || 'Founder',
       departmentId: null, employmentType: 'Founder', roles: [], isAdmin: true, isSuperAdmin: true,
       active: true, joinedDate: new Date().toISOString().slice(0, 10),
@@ -247,19 +273,10 @@ app.post('/api/auth/login', async (req, res) => {
     const match = employees.find((e) => (e.name || '').toLowerCase() === String(name).trim().toLowerCase());
     if (!match) return res.status(401).json({ error: 'No match. Check name and PIN.' });
 
-    let ok = false;
-    if (match.pinHash) {
-      ok = await bcrypt.compare(String(pin), match.pinHash);
-    } else if (match.pin !== undefined) {
-      // Legacy plaintext PIN from before this migration — verify once, then
-      // upgrade this employee to a hash and drop the plaintext value for good.
-      ok = String(match.pin) === String(pin);
-      if (ok) {
-        match.pinHash = await bcrypt.hash(String(pin), 10);
-        delete match.pin;
-        await writeStorageValue('employees', employees);
-      }
-    }
+    const wasLegacyPlaintext = match.pinHash === undefined && match.pin !== undefined;
+    const ok = await verifyEmployeePin(match, pin);
+    if (ok && wasLegacyPlaintext) await writeStorageValue('employees', employees); // persist the upgrade to a hash
+
     if (!ok) return res.status(401).json({ error: 'No match. Check name and PIN.' });
     if (match.pendingApproval) return res.status(403).json({ error: 'Your account is awaiting admin approval.' });
     if (match.active === false) return res.status(403).json({ error: 'This account is marked inactive. Contact an admin.' });
@@ -294,6 +311,14 @@ function optionalAuth(req, res, next) {
   try { req.user = jwt.verify(token, JWT_SECRET); } catch (e) { req.user = null; }
   next();
 }
+function requireAdmin(req, res, next) {
+  requireAuth(req, res, () => {
+    if (!(req.user.isAdmin || req.user.isSuperAdmin)) {
+      return res.status(403).json({ error: 'Admin access required.' });
+    }
+    next();
+  });
+}
 
 // Keys only an admin/super-admin token may write to — HR, payroll, and
 // company-configuration data. ('employees' is handled separately below,
@@ -314,7 +339,14 @@ const ADMIN_ONLY_WRITE_KEYS = new Set([
          (a forgot-PIN reset).
    Anything else — editing roles, activating/deactivating someone, removing
    an employee, touching more than one record, replacing the whole list —
-   is rejected unless the caller has an admin/super-admin token. */
+   is rejected unless the caller has an admin/super-admin token.
+
+   NOTE: as of the dedicated /api/employees, /api/auth/pin/change, and
+   /api/auth/forgot/* / /api/auth/register/* endpoints below, the frontend
+   no longer needs to hit this path for either case — those flows now patch
+   one record server-side instead of resubmitting the whole array. This is
+   kept as defense in depth for any other/older client still POSTing the
+   full list directly. */
 function isUnprivilegedPendingSignup(e) {
   return !!e && e.pendingApproval === true && e.active === false && !e.isAdmin && !e.isSuperAdmin;
 }
@@ -360,6 +392,212 @@ function anonymousEmployeeWriteIsAllowed(oldArr, newArr, callerSub) {
   return false; // any other size change (removals, bulk edits) needs an admin token
 }
 
+/* ==================================================================
+   Dedicated single-record credential endpoints.
+
+   The client's copy of 'employees' (from GET /api/storage/employees)
+   NEVER contains pin or pinHash for ANY employee — that's stripped on
+   every read, on purpose, so a credential can't leak over the wire.
+   That means any code path that edits an employee's non-credential
+   fields (name, title, role, active flag, etc.) and then re-saves the
+   *entire* array back via POST /api/storage/employees will, unless
+   something restores it, submit every OTHER employee's record with no
+   pinHash at all — silently deleting their password and locking them
+   out at their next login. The frontend has (or had) over a dozen call
+   sites that do exactly this for ordinary HR edits.
+
+   Two independent fixes are applied:
+   1) These endpoints let the three PIN-touching flows (add employee,
+      change my PIN, forgot-PIN reset, registration) update exactly one
+      record's credential server-side, without the client ever sending
+      the array at all.
+   2) As a backstop for every OTHER existing (and any future) code path
+      that still does a full-array save of 'employees' — see the merge
+      in POST /api/storage/:key below — any employee in an incoming
+      write that isn't explicitly changing its PIN has its real
+      pinHash restored from the server's current copy before the write
+      lands, so an ordinary HR edit can never wipe someone else's login.
+   ================================================================== */
+
+// Add a team member — admin only. Employee is created and hashed entirely
+// server-side; the client never sends (or needs) the rest of the list.
+app.post('/api/employees', requireAdmin, async (req, res) => {
+  const { name, title, employmentType, departmentId, email, managerId, roles, isAdmin, pin } = req.body || {};
+  if (!name || !pin) return res.status(400).json({ error: 'name and pin are required' });
+  if (String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 digits.' });
+  try {
+    const employees = (await readStorageValue('employees')) || [];
+    if (employees.some((e) => (e.name || '').toLowerCase() === String(name).trim().toLowerCase())) {
+      return res.status(409).json({ error: 'An employee with that name already exists.' });
+    }
+    const emp = {
+      id: makeEmployeeId(),
+      name: String(name).trim(), title: title || '', employmentType: employmentType || 'Full-time',
+      departmentId: departmentId || null, email: (email || '').trim(), pinHash: await bcrypt.hash(String(pin), 10),
+      managerId: managerId || null, roles: Array.isArray(roles) ? roles : [],
+      // Only an actual admin/super-admin *token* can ever grant admin here —
+      // req.user comes from requireAdmin's verified JWT, not from the body,
+      // so a non-admin caller could never smuggle isAdmin:true through.
+      isAdmin: !!(req.user.isSuperAdmin && isAdmin), isSuperAdmin: false, active: true,
+      joinedDate: new Date().toISOString().slice(0, 10),
+    };
+    if (!validateSuperAdminIntegrity([emp])) return res.status(500).json({ error: 'internal integrity check failed' });
+    employees.push(emp);
+    await writeStorageValue('employees', employees);
+    broadcastUpdate('employees', stripCreds(employees));
+    res.json({ employee: safeEmployee(emp) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'could not add employee' });
+  }
+});
+
+// Change my own PIN — requires a valid session token, verifies currentPin
+// server-side against the real pinHash, updates only that one field.
+app.post('/api/auth/pin/change', requireAuth, async (req, res) => {
+  const { currentPin, newPin } = req.body || {};
+  if (!currentPin || !newPin) return res.status(400).json({ error: 'currentPin and newPin are required' });
+  if (String(newPin).length < 4) return res.status(400).json({ error: 'New PIN must be at least 4 digits.' });
+  try {
+    const employees = (await readStorageValue('employees')) || [];
+    const match = employees.find((e) => e.id === req.user.sub);
+    if (!match) return res.status(404).json({ error: 'Account not found.' });
+    const ok = await verifyEmployeePin(match, currentPin);
+    if (!ok) return res.status(401).json({ error: 'Current PIN is incorrect.' });
+    match.pinHash = await bcrypt.hash(String(newPin), 10);
+    delete match.pin;
+    await writeStorageValue('employees', employees);
+    broadcastUpdate('employees', stripCreds(employees));
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'pin change failed' });
+  }
+});
+
+// Pending forgot-PIN resets: sessionId -> { employeeId, name, email, code, expires }.
+const pendingForgots = new Map();
+
+app.post('/api/auth/forgot/request-code', async (req, res) => {
+  const { name, email } = req.body || {};
+  if (!name || !email) return res.status(400).json({ error: 'name and email are required' });
+  try {
+    const employees = (await readStorageValue('employees')) || [];
+    const match = employees.find((e) =>
+      (e.name || '').toLowerCase() === String(name).trim().toLowerCase() &&
+      (e.email || '').toLowerCase() === String(email).trim().toLowerCase()
+    );
+    if (!match) return res.status(404).json({ error: 'No matching account found.' });
+    const sessionId = makeSessionId();
+    const code = makeVerificationCode();
+    const expires = Date.now() + 10 * 60 * 1000;
+    pendingForgots.set(sessionId, { employeeId: match.id, name: match.name, email: match.email, code, expires });
+    await sendEmailInternal({ type: 'verify', to: match.email, name: match.name, code, expiresAt: expires, reason: 'reset your PIN' });
+    res.json({ sessionId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'could not start reset' });
+  }
+});
+
+app.post('/api/auth/forgot/resend-code', async (req, res) => {
+  const { sessionId } = req.body || {};
+  const draft = pendingForgots.get(sessionId);
+  if (!draft) return res.status(400).json({ error: 'This reset session is invalid or expired. Start again.' });
+  draft.code = makeVerificationCode();
+  draft.expires = Date.now() + 10 * 60 * 1000;
+  await sendEmailInternal({ type: 'verify', to: draft.email, name: draft.name, code: draft.code, expiresAt: draft.expires, reason: 'reset your PIN' });
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/forgot/confirm', async (req, res) => {
+  const { sessionId, code, newPin } = req.body || {};
+  const draft = pendingForgots.get(sessionId);
+  if (!draft) return res.status(400).json({ error: 'This reset session is invalid or expired. Start again.' });
+  if (Date.now() > draft.expires) { pendingForgots.delete(sessionId); return res.status(400).json({ error: 'That code has expired. Request a new one.' }); }
+  if (String(code || '').trim() !== draft.code) return res.status(401).json({ error: "That code doesn't match." });
+  if (!newPin || String(newPin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 digits.' });
+  try {
+    const employees = (await readStorageValue('employees')) || [];
+    const match = employees.find((e) => e.id === draft.employeeId);
+    if (!match) { pendingForgots.delete(sessionId); return res.status(404).json({ error: 'Account not found.' }); }
+    match.pinHash = await bcrypt.hash(String(newPin), 10);
+    delete match.pin;
+    await writeStorageValue('employees', employees);
+    broadcastUpdate('employees', stripCreds(employees));
+    pendingForgots.delete(sessionId);
+    await sendEmailInternal({ type: 'reset-confirm', to: draft.email, name: draft.name });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'reset failed' });
+  }
+});
+
+// Pending self-registrations: sessionId -> { name, email, pin, code, expires }.
+const pendingRegistrations = new Map();
+
+app.post('/api/auth/register/request-code', async (req, res) => {
+  const { name, email, pin } = req.body || {};
+  if (!name || !email || !pin) return res.status(400).json({ error: 'name, email, and pin are required' });
+  if (String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 digits.' });
+  try {
+    const employees = (await readStorageValue('employees')) || [];
+    if (employees.some((e) => (e.name || '').toLowerCase() === String(name).trim().toLowerCase())) {
+      return res.status(409).json({ error: 'An account with that name already exists.' });
+    }
+    const sessionId = makeSessionId();
+    const code = makeVerificationCode();
+    const expires = Date.now() + 10 * 60 * 1000;
+    pendingRegistrations.set(sessionId, { name: String(name).trim(), email: String(email).trim(), pin: String(pin), code, expires });
+    await sendEmailInternal({ type: 'verify', to: email, name, code, expiresAt: expires });
+    res.json({ sessionId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'could not start verification' });
+  }
+});
+
+app.post('/api/auth/register/resend-code', async (req, res) => {
+  const { sessionId } = req.body || {};
+  const draft = pendingRegistrations.get(sessionId);
+  if (!draft) return res.status(400).json({ error: 'This verification session is invalid or expired. Start again.' });
+  draft.code = makeVerificationCode();
+  draft.expires = Date.now() + 10 * 60 * 1000;
+  await sendEmailInternal({ type: 'verify', to: draft.email, name: draft.name, code: draft.code, expiresAt: draft.expires });
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/register/confirm', async (req, res) => {
+  const { sessionId, code } = req.body || {};
+  const draft = pendingRegistrations.get(sessionId);
+  if (!draft) return res.status(400).json({ error: 'This verification session is invalid or already used. Start again.' });
+  if (Date.now() > draft.expires) { pendingRegistrations.delete(sessionId); return res.status(400).json({ error: 'That code has expired. Request a new one.' }); }
+  if (String(code || '').trim() !== draft.code) return res.status(401).json({ error: "That code doesn't match." });
+  try {
+    const employees = (await readStorageValue('employees')) || [];
+    if (employees.some((e) => (e.name || '').toLowerCase() === draft.name.toLowerCase())) {
+      pendingRegistrations.delete(sessionId);
+      return res.status(409).json({ error: 'An account with that name already exists.' });
+    }
+    const emp = {
+      id: makeEmployeeId(),
+      name: draft.name, email: draft.email, pinHash: await bcrypt.hash(draft.pin, 10), emailVerified: true,
+      title: '', departmentId: null, employmentType: 'Full-time', roles: ['Employee'],
+      isAdmin: false, isSuperAdmin: false, active: false, pendingApproval: true,
+      joinedDate: new Date().toISOString().slice(0, 10),
+    };
+    employees.push(emp);
+    await writeStorageValue('employees', employees);
+    broadcastUpdate('employees', stripCreds(employees));
+    pendingRegistrations.delete(sessionId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'registration failed' });
+  }
+});
+
 /* ---------------- Generic key/value storage (mirrors the app's loadKey/saveKey) ---------------- */
 
 app.get('/api/storage', async (req, res) => {
@@ -375,12 +613,11 @@ app.get('/api/storage', async (req, res) => {
 
 // Reads stay open (unauthenticated) for now — locking these down would also
 // require rebuilding registration/forgot-PIN as dedicated backend endpoints
-// (they currently look up candidates from the client-side employee list).
-// The important fix already applied: that list no longer contains anyone's
-// actual PIN (see sanitizeEmployeePins), and every WRITE below now requires
-// either a real per-user token or one of the two narrowly-validated
-// anonymous shapes. That's what stopped your data from being wipeable by
-// anyone who finds this URL.
+// (they now are — see above). The important fix already applied: that list
+// no longer contains anyone's actual PIN (see sanitizeEmployeePins), and
+// every WRITE below now requires either a real per-user token or one of the
+// two narrowly-validated anonymous shapes. That's what stopped your data
+// from being wipeable by anyone who finds this URL.
 app.get('/api/storage/:key', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT value FROM app_storage WHERE storage_key=?', [req.params.key]);
@@ -390,7 +627,7 @@ app.get('/api/storage/:key', async (req, res) => {
       // PINs are short numeric codes — even a bcrypt hash of one is
       // brute-forceable in well under a second if it ever leaves the
       // server, so neither the plaintext nor the hash is included here.
-      value = value.map(({ pin, pinHash, ...rest }) => rest);
+      value = stripCreds(value);
     }
     res.json({ key: req.params.key, value });
   } catch (e) {
@@ -409,11 +646,33 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
 
   try {
     if (key === 'employees') {
+      const current = (await readStorageValue('employees')) || [];
       if (!isAdminToken) {
-        const current = (await readStorageValue('employees')) || [];
         if (!anonymousEmployeeWriteIsAllowed(current, value, req.user ? req.user.sub : null)) {
           return res.status(403).json({ error: 'Sign in as an admin to make this change to the employee list.' });
         }
+      }
+      /* Credential-preserving merge — this is the actual fix for the
+         "logged in fine once, then PIN says incorrect" bug class.
+         GET /api/storage/employees (and every other read this client ever
+         does) never includes pin or pinHash. So the moment ANY code path —
+         adding a teammate, editing a title, toggling active/inactive,
+         changing a role, flipping a notification preference, this whole
+         generic route in general — reads that list, edits it, and posts
+         the FULL array back, every employee it didn't just edit has no
+         credential field at all in what's arriving here. Persisting that
+         as-is deletes their password.
+         Fix: for every incoming record that ISN'T carrying a plaintext
+         `pin` (i.e. isn't the one actually changing its PIN right now),
+         restore the real pinHash from the server's current copy by id
+         before this gets written. A record with a plaintext `pin` still
+         gets hashed fresh by sanitizeEmployeePins() below, exactly as
+         before. */
+      const currentById = new Map(current.map((e) => [e.id, e]));
+      for (const emp of value) {
+        if (!emp || emp.pin !== undefined) continue; // this one IS setting/changing its PIN — let it through as-is
+        const existing = currentById.get(emp.id);
+        if (existing && existing.pinHash && emp.pinHash === undefined) emp.pinHash = existing.pinHash;
       }
       if (!validateSuperAdminIntegrity(value)) {
         return res.status(403).json({ error: `Only ${SUPER_ADMIN_EMAIL} may hold Super Admin.` });
@@ -442,7 +701,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
 
     await writeStorageValue(key, value);
     res.json({ ok: true });
-    broadcastUpdate(key, value);
+    broadcastUpdate(key, key === 'employees' ? stripCreds(value) : value);
     if (key === 'notifications' || key === 'announcements') {
       handlePushForNewItems(key, value).catch((e) => console.error('[push]', e.message));
     }
@@ -572,14 +831,6 @@ async function handlePushForNewItems(key, arr) {
    past snapshots of any key (from app_storage_history, written on every
    save — see writeStorageValue) and roll a key back to an earlier version.
    ================================================================== */
-function requireAdmin(req, res, next) {
-  requireAuth(req, res, () => {
-    if (!(req.user.isAdmin || req.user.isSuperAdmin)) {
-      return res.status(403).json({ error: 'Admin access required.' });
-    }
-    next();
-  });
-}
 
 // List recent snapshots for a key (most recent first). Returns previews,
 // not full values, so this stays light even for big keys like chatMessages.
@@ -609,7 +860,7 @@ app.get('/api/storage-history/:key/:id', requireAdmin, async (req, res) => {
     let value;
     try { value = JSON.parse(rows[0].value); } catch (e) { value = rows[0].value; }
     if (req.params.key === 'employees' && Array.isArray(value)) {
-      value = value.map(({ pin, pinHash, ...rest }) => rest); // never expose PINs, even in a historical snapshot
+      value = stripCreds(value); // never expose PINs, even in a historical snapshot
     }
     res.json({ key: req.params.key, changedAt: rows[0].changed_at, value });
   } catch (e) {
@@ -638,7 +889,7 @@ app.post('/api/storage-history/:key/:id/restore', requireAdmin, async (req, res)
       }
     }
     await writeStorageValue(req.params.key, value);
-    broadcastUpdate(req.params.key, value);
+    broadcastUpdate(req.params.key, req.params.key === 'employees' ? stripCreds(value) : value);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
