@@ -637,25 +637,30 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
     let newlyDeactivated = [];
     if (key === 'employees') {
       const current = (await readStorageValue('employees')) || [];
-      if (!isAdminToken) {
-        if (!anonymousEmployeeWriteIsAllowed(current, value, req.user ? req.user.sub : null)) {
-          return res.status(403).json({ error: 'Sign in as an admin to make this change to the employee list.' });
-        }
-      }
+
       /* Credential-preserving merge — this is the actual fix for the
-         "logged in fine once, then PIN says incorrect" bug class.
-         GET /api/storage/employees (and every other read this client ever
-         does) never includes pin or pinHash. So the moment ANY code path —
-         adding a teammate, editing a title, toggling active/inactive,
-         changing a role, flipping a notification preference, this whole
-         generic route in general — reads that list, edits it, and posts
-         the FULL array back, every employee it didn't just edit has no
-         credential field at all in what's arriving here. Persisting that
-         as-is deletes their password.
+         "logged in fine once, then PIN says incorrect" bug class, AND
+         it must run BEFORE anonymousEmployeeWriteIsAllowed below, not
+         after. GET /api/storage/employees (and every other read this
+         client ever does) never includes pin or pinHash. So the moment
+         ANY code path — adding a teammate, editing a title, toggling
+         active/inactive, changing a role, flipping a notification
+         preference, verifying an email, this whole generic route in
+         general — reads that list, edits it, and posts the FULL array
+         back, every employee it didn't just edit has no credential
+         field at all in what's arriving here. If we ran the shape check
+         against that raw payload, every other employee's missing
+         pinHash would look like a "changed" field, changedCount would
+         blow past 1, and the write would get rejected with a 403 —
+         even a plain single-field self-service edit like verifying your
+         own email. That's exactly what was happening: a real change was
+         being misread as N changes because of a field the client never
+         had in the first place.
          Fix: for every incoming record that ISN'T carrying a plaintext
          `pin` (i.e. isn't the one actually changing its PIN right now),
          restore the real pinHash from the server's current copy by id
-         before this gets written. A record with a plaintext `pin` still
+         BEFORE the shape/authorization check runs, so the diff is
+         comparing like-for-like. A record with a plaintext `pin` still
          gets hashed fresh by sanitizeEmployeePins() below, exactly as
          before. */
       const currentById = new Map(current.map((e) => [e.id, e]));
@@ -663,6 +668,12 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
         if (!emp || emp.pin !== undefined) continue; // this one IS setting/changing its PIN — let it through as-is
         const existing = currentById.get(emp.id);
         if (existing && existing.pinHash && emp.pinHash === undefined) emp.pinHash = existing.pinHash;
+      }
+
+      if (!isAdminToken) {
+        if (!anonymousEmployeeWriteIsAllowed(current, value, req.user ? req.user.sub : null)) {
+          return res.status(403).json({ error: 'Sign in as an admin to make this change to the employee list.' });
+        }
       }
       if (!validateSuperAdminIntegrity(value)) {
         return res.status(403).json({ error: `Only ${SUPER_ADMIN_EMAIL} may hold Super Admin.` });
