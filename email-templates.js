@@ -188,7 +188,7 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
       </p>
     </div>
 
-    ${button('Open ' + BRAND.companyName, loginUrl)}
+    ${button('Open ' + BRAND.companyName + 'OS ', loginUrl)}
 
     <p style="margin:22px 0 0;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
       Wishing you a great start — welcome aboard!
