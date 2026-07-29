@@ -46,7 +46,7 @@ function shell({ appUrl, preheader, bodyHtml }) {
           <img src="${logoUrl}" width="40" height="40" border="0" alt="${escapeHtml(BRAND.companyName)}" style="width:40px;height:40px;border-radius:9px;display:inline-block;vertical-align:middle;border:0;">
           <span style="font-size:16px;font-weight:700;color:${BRAND.text};margin-left:8px;vertical-align:middle;">${escapeHtml(BRAND.companyName)}</span>
         </td></tr>
-        <tr><td style="background:#FFFFFF;border:1px solid ${BRAND.border};border-radius:14px;padding:36px 32px;box-shadow:0 4px 24px rgba(16,24,40,0.06);">
+        <tr><td style="background:#FFFFFF;border:1px solid ${BRAND.border};border-radius:14px;padding:36px 40px;box-shadow:0 4px 24px rgba(16,24,40,0.06);">
           ${bodyHtml}
         </td></tr>
         <tr><td style="padding:20px 8px 0;text-align:center;">
