@@ -182,7 +182,7 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
     </div>
     ${button('Open Sarab Tech OS', loginUrl)}
     <p style="margin:22px 0 0;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
-      Wishing you a great start — welcome aboard!
+      Wishing you a great start, welcome aboard!
     </p>
   `;
   return {
