@@ -52,8 +52,7 @@ function shell({ appUrl, preheader, bodyHtml }) {
         </td></tr>
         <tr><td style="padding:20px 8px 0;text-align:center;">
           <p style="margin:0;font-size:12px;color:#98A2B3;line-height:1.6;">
-            This is an automated message from ${escapeHtml(BRAND.companyName)}.<br>
-            If you weren't expecting this, you can safely ignore it.
+            This is an automated message from ${escapeHtml(BRAND.companyName)}.
           </p>
         </td></tr>
       </table>
