@@ -171,6 +171,30 @@ function stripCreds(employees) {
   return employees.map(({ pin, pinHash, ...rest }) => rest);
 }
 
+/* Only admins/super-admins, or an employee who holds the Finance role, may
+   ever see salary figures for anyone but themselves. stripCreds() already
+   removes pin/pinHash for every caller; this removes `salary` for everyone
+   EXCEPT those privileged callers, so a non-Finance employee reading the
+   shared 'employees' list (needed for names/roles/departments across the
+   app) never receives payroll data alongside it. Applied on every read AND
+   on every realtime broadcast — a broadcast goes out on one shared channel
+   with no per-recipient targeting, so it's stripped unconditionally there
+   rather than attempting (impossible) per-viewer redaction on a single
+   payload. */
+function redactSalary(employees, viewerId, isAdminToken) {
+  if (!Array.isArray(employees)) return employees;
+  if (isAdminToken) return employees;
+  const me = employees.find((e) => e.id === viewerId);
+  const isFinance = !!(me && Array.isArray(me.roles) && me.roles.includes('Finance'));
+  if (isFinance) return employees;
+  return employees.map(({ salary, ...rest }) => rest);
+}
+// Broadcast-only variant: no viewer to check, so salary is always stripped.
+function stripSalaryForBroadcast(employees) {
+  if (!Array.isArray(employees)) return employees;
+  return employees.map(({ salary, ...rest }) => rest);
+}
+
 /* ==================================================================
    AUTH — per-user tokens issued at login, replacing the old model
    where the client fetched the whole 'employees' list unauthenticated
@@ -650,7 +674,7 @@ app.post('/api/employees', requireAdmin, async (req, res) => {
     if (!validateSuperAdminIntegrity([emp])) return res.status(500).json({ error: 'internal integrity check failed' });
     employees.push(emp);
     await writeStorageValue('employees', employees);
-    broadcastUpdate('employees', stripCreds(employees));
+    broadcastUpdate('employees', stripSalaryForBroadcast(stripCreds(employees)));
     // Admin-added accounts are active immediately — send the welcome/onboarding email now.
     sendWelcomeEmail(emp).catch((e) => console.error('[welcome-email]', e.message));
     res.json({ employee: safeEmployee(emp) });
@@ -675,7 +699,7 @@ app.post('/api/auth/pin/change', requireAuth, async (req, res) => {
     match.pinHash = await bcrypt.hash(String(newPin), 10);
     delete match.pin;
     await writeStorageValue('employees', employees);
-    broadcastUpdate('employees', stripCreds(employees));
+    broadcastUpdate('employees', stripSalaryForBroadcast(stripCreds(employees)));
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -732,7 +756,7 @@ app.post('/api/auth/forgot/confirm', async (req, res) => {
     match.pinHash = await bcrypt.hash(String(newPin), 10);
     delete match.pin;
     await writeStorageValue('employees', employees);
-    broadcastUpdate('employees', stripCreds(employees));
+    broadcastUpdate('employees', stripSalaryForBroadcast(stripCreds(employees)));
     pendingForgots.delete(sessionId);
     await sendEmailInternal({ type: 'reset-confirm', to: draft.email, name: draft.name });
     res.json({ ok: true });
@@ -776,6 +800,11 @@ app.get('/api/storage/:key', requireAuth, async (req, res) => {
       // brute-forceable in well under a second if it ever leaves the
       // server, so neither the plaintext nor the hash is included here.
       value = stripCreds(value);
+      // Salary is HR/finance-sensitive — only an admin/super-admin, or an
+      // employee who actually holds the Finance role, gets it. Everyone
+      // else still needs the rest of this array (names/roles/departments
+      // are used all over the app), just not the payroll figures.
+      value = redactSalary(value, req.user.sub, !!(req.user.isAdmin || req.user.isSuperAdmin));
     }
     res.json({ key: req.params.key, value });
   } catch (e) {
@@ -921,7 +950,7 @@ app.post('/api/storage/:key', optionalAuth, async (req, res) => {
 
     await writeStorageValue(key, value);
     res.json({ ok: true });
-    broadcastUpdate(key, key === 'employees' ? stripCreds(value) : value);
+    broadcastUpdate(key, key === 'employees' ? stripSalaryForBroadcast(stripCreds(value)) : value);
     if (key === 'notifications' || key === 'announcements') {
       handlePushForNewItems(key, value).catch((e) => console.error('[push]', e.message));
     }
@@ -1115,7 +1144,7 @@ app.post('/api/storage-history/:key/:id/restore', requireAdmin, async (req, res)
       }
     }
     await writeStorageValue(req.params.key, value);
-    broadcastUpdate(req.params.key, req.params.key === 'employees' ? stripCreds(value) : value);
+    broadcastUpdate(req.params.key, req.params.key === 'employees' ? stripSalaryForBroadcast(stripCreds(value)) : value);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
