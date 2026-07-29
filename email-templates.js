@@ -6,9 +6,8 @@
  * match the app's brand blue (#2952CC). Each function returns { subject, html }.
  *
  * Require this from email-server-addon.js:
- *   const { buildEmail } = require('./email-templates');
+ * const { buildEmail } = require('./email-templates');
  */
-
 const BRAND = {
   blue: '#2952CC',
   blueDark: '#1E3F9E',
@@ -20,13 +19,11 @@ const BRAND = {
   amber: '#B54708',
   companyName: 'Sarab Technologies',
 };
-
 function escapeHtml(str) {
   return String(str == null ? '' : str).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
-
 /** Shared wrapper: logo header, white card, footer. `bodyHtml` goes inside the card. */
 function shell({ appUrl, preheader, bodyHtml }) {
   const logoUrl = appUrl ? `${appUrl.replace(/\/$/, '')}/assets/ST_Icon.png` : '';
@@ -61,7 +58,6 @@ function shell({ appUrl, preheader, bodyHtml }) {
 </body>
 </html>`;
 }
-
 function button(label, href) {
   return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 4px;">
     <tr><td style="border-radius:9px;background:${BRAND.blue};">
@@ -69,9 +65,7 @@ function button(label, href) {
     </td></tr>
   </table>`;
 }
-
 /* ---------------- Individual templates ---------------- */
-
 function verifyTemplate({ name, code, expiresAt, reason, appUrl }) {
   const mins = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / 60000)) : 10;
   const purpose = reason || 'verify your email address';
@@ -90,7 +84,6 @@ function verifyTemplate({ name, code, expiresAt, reason, appUrl }) {
     html: shell({ appUrl, preheader: `Your verification code is ${code}`, bodyHtml: body }),
   };
 }
-
 function resetConfirmTemplate({ name, appUrl }) {
   const body = `
     <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Your PIN was changed</h1>
@@ -106,7 +99,6 @@ function resetConfirmTemplate({ name, appUrl }) {
     html: shell({ appUrl, preheader: 'Your account PIN was just changed', bodyHtml: body }),
   };
 }
-
 function notificationTemplate({ name, title, message, typeLabel, deepLink, appUrl }) {
   const body = `
     <span style="display:inline-block;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:${BRAND.blue};background:#EAF0FE;padding:4px 10px;border-radius:6px;margin-bottom:14px;">${escapeHtml(typeLabel || 'Notification')}</span>
@@ -120,7 +112,6 @@ function notificationTemplate({ name, title, message, typeLabel, deepLink, appUr
     html: shell({ appUrl, preheader: message || '', bodyHtml: body }),
   };
 }
-
 function chatTemplate({ name, from, preview, deepLink, appUrl }) {
   const body = `
     <h1 style="margin:0 0 12px;font-size:19px;color:${BRAND.text};">New message from ${escapeHtml(from || 'a teammate')}</h1>
@@ -135,7 +126,6 @@ function chatTemplate({ name, from, preview, deepLink, appUrl }) {
     html: shell({ appUrl, preheader: preview || '', bodyHtml: body }),
   };
 }
-
 function deactivatedTemplate({ name, appUrl }) {
   const body = `
     <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Your account has been deactivated</h1>
@@ -154,7 +144,6 @@ function deactivatedTemplate({ name, appUrl }) {
     html: shell({ appUrl, preheader: `Your account has been deactivated. Contact your admin if this is unexpected.`, bodyHtml: body }),
   };
 }
-
 /**
  * Sent the moment an admin directly adds a new team member. Kept short and
  * simple on purpose: a greeting, their role, a reminder to install the PWA
@@ -165,31 +154,31 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
   const firstName = escapeHtml((name || '').split(/\s+/)[0] || '');
   const roleLine = title || (Array.isArray(roles) && roles.length ? roles.join(', ') : (isAdmin ? 'Admin' : 'Employee'));
   const loginUrl = 'https://sarabtechnologies.name.ng/';
-
   const body = `
     <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Welcome to ${escapeHtml(BRAND.companyName)}, ${firstName}! 🎉</h1>
     <p style="margin:0 0 20px;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
       Your account has been created and you're all set to get started.
     </p>
-
     <div style="background:${BRAND.bg};border:1px solid ${BRAND.border};border-radius:10px;padding:14px 16px;margin-bottom:20px;">
       <div style="font-size:12px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:${BRAND.blue};margin-bottom:4px;">Your role</div>
       <div style="font-size:15px;font-weight:700;color:${BRAND.text};">${escapeHtml(roleLine)}</div>
     </div>
-
     <p style="margin:0 0 16px;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
       Go ahead and install the app on your device like you normally would. It works as a PWA, so no app store needed.
     </p>
-
+    <div style="background:${BRAND.bg};border:1px solid ${BRAND.border};border-radius:10px;padding:14px 16px;margin-bottom:20px;">
+      <div style="font-size:12px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:${BRAND.blue};margin-bottom:4px;">How to sign in</div>
+      <p style="margin:0;font-size:14px;color:${BRAND.text};line-height:1.6;">
+        Log in with your full name <strong>${escapeHtml(name || '')}</strong> and the default PIN <strong>1234</strong>.
+      </p>
+    </div>
     <div style="background:${BRAND.amber}0D;border:1px solid #FBE3C6;border-radius:10px;padding:14px 16px;margin:0 0 20px;">
       <div style="font-size:13px;font-weight:700;color:${BRAND.amber};margin-bottom:4px;">⚠️ Required: sign your agreement</div>
       <p style="margin:0;font-size:13px;color:${BRAND.textDim};line-height:1.6;">
         Once you sign in, you'll need to review and sign your company agreement before the rest of the app unlocks.
       </p>
     </div>
-
-    ${button('Open ' + BRAND.companyName + 'OS ', loginUrl)}
-
+    ${button('Open Sarab Tech OS', loginUrl)}
     <p style="margin:22px 0 0;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
       Wishing you a great start — welcome aboard!
     </p>
@@ -199,7 +188,6 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
     html: shell({ appUrl, preheader: `Your account is ready, Install the app and sign your agreement to get started.`, bodyHtml: body }),
   };
 }
-
 /** Dispatch by type. Returns { subject, html } or throws for an unknown type. */
 function buildEmail(type, payload) {
   switch (type) {
@@ -212,5 +200,4 @@ function buildEmail(type, payload) {
     default: throw new Error(`Unknown email type: ${type}`);
   }
 }
-
 module.exports = { buildEmail };
