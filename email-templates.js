@@ -164,7 +164,7 @@ function deactivatedTemplate({ name, appUrl }) {
 function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
   const firstName = escapeHtml((name || '').split(/\s+/)[0] || '');
   const roleLine = title || (Array.isArray(roles) && roles.length ? roles.join(', ') : (isAdmin ? 'Admin' : 'Employee'));
-  const loginUrl = 'https://www.sarabtechnologies.name.ng/';
+  const loginUrl = 'https://sarabtechnologies.name.ng/';
 
   const body = `
     <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Welcome to ${escapeHtml(BRAND.companyName)}, ${firstName}! 🎉</h1>
