@@ -165,7 +165,7 @@ function deactivatedTemplate({ name, appUrl }) {
 function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
   const firstName = escapeHtml((name || '').split(/\s+/)[0] || '');
   const roleLine = title || (Array.isArray(roles) && roles.length ? roles.join(', ') : (isAdmin ? 'Admin' : 'Employee'));
-  const loginUrl = appUrl ? appUrl.replace(/\/$/, '') + '/' : '#';
+  const loginUrl = 'https://www.sarabtechnologies.name.ng/';
 
   const body = `
     <h1 style="margin:0 0 12px;font-size:20px;color:${BRAND.text};">Welcome to ${escapeHtml(BRAND.companyName)}, ${firstName}! 🎉</h1>
@@ -179,7 +179,7 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
     </div>
 
     <p style="margin:0 0 16px;font-size:14px;color:${BRAND.textDim};line-height:1.6;">
-      Go ahead and install the app on your device like you normally would — it works as a PWA, so no app store needed.
+      Go ahead and install the app on your device like you normally would. It works as a PWA, so no app store needed.
     </p>
 
     <div style="background:${BRAND.amber}0D;border:1px solid #FBE3C6;border-radius:10px;padding:14px 16px;margin:0 0 20px;">
@@ -197,7 +197,7 @@ function welcomeTemplate({ name, title, roles, isAdmin, appUrl }) {
   `;
   return {
     subject: `Welcome to ${BRAND.companyName}, ${firstName}!`,
-    html: shell({ appUrl, preheader: `Your account is ready — install the app and sign your agreement to get started.`, bodyHtml: body }),
+    html: shell({ appUrl, preheader: `Your account is ready, Install the app and sign your agreement to get started.`, bodyHtml: body }),
   };
 }
 
