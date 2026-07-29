@@ -26,7 +26,9 @@ function escapeHtml(str) {
 }
 /** Shared wrapper: logo header, white card, footer. `bodyHtml` goes inside the card. */
 function shell({ appUrl, preheader, bodyHtml }) {
-  const logoUrl = appUrl ? `${appUrl.replace(/\/$/, '')}/assets/ST_Icon.png` : '';
+  const logoUrl = appUrl
+    ? `${appUrl.replace(/\/$/, '')}/assets/ST_Icon.png`
+    : 'https://sarabtechnologies.name.ng/assets/ST_Icon.png';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -41,7 +43,7 @@ function shell({ appUrl, preheader, bodyHtml }) {
     <tr><td align="center">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;">
         <tr><td style="padding:0 4px 20px;text-align:center;">
-          ${logoUrl ? `<img src="${logoUrl}" width="40" height="40" alt="${escapeHtml(BRAND.companyName)}" style="border-radius:9px;display:inline-block;vertical-align:middle;">` : ''}
+          <img src="${logoUrl}" width="40" height="40" border="0" alt="${escapeHtml(BRAND.companyName)}" style="width:40px;height:40px;border-radius:9px;display:inline-block;vertical-align:middle;border:0;">
           <span style="font-size:16px;font-weight:700;color:${BRAND.text};margin-left:8px;vertical-align:middle;">${escapeHtml(BRAND.companyName)}</span>
         </td></tr>
         <tr><td style="background:#FFFFFF;border:1px solid ${BRAND.border};border-radius:14px;padding:36px 32px;box-shadow:0 4px 24px rgba(16,24,40,0.06);">
